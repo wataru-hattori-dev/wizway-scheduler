@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: wizway-scheduler API (FastAPI + Mangum) + DynamoDB
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.13
+
+Parameters:
+  DynamoDBTableName:
+    Type: String
+    Default: wizway-scheduler
+  AllowDevReseed:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Local DynamoDB reseed only. Keep false on AWS.
+  AllowDevAuth:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Dev quick-login (/auth/dev/login). Keep false on AWS.
+  EnableApiDocs:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Expose /docs /redoc /openapi.json. Keep false on AWS.
+  CorsOrigins:
+    Type: String
+    Description: >-
+      Comma-separated browser origins (e.g. https://dxxxx.cloudfront.net).
+      Do not use *. Pass at deploy time; no wildcard default.
+  SlackTestMode:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  SlackTestChannelId:
+    Type: String
+    Default: ''
+  SlackDryRun:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  SlackDestinationLabels:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  SlackChannelMeguro:
+    Type: String
+    Default: ''
+  SlackChannelYamamoto:
+    Type: String
+    Default: ''
+  SlackChannelIshibashi:
+    Type: String
+    Default: ''
+  SlackChannelTanaka:
+    Type: String
+    Default: ''
+  SlackChannelHamada:
+    Type: String
+    Default: ''
+  SlackChannelSales:
+    Type: String
+    Default: ''
+  SlackClientId:
+    Type: String
+    Default: ''
+  SlackClientSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+  SlackRedirectUri:
+    Type: String
+    Default: http://localhost:5173/auth/slack/callback
+  SlackTeamId:
+    Type: String
+    Default: ''
+  SlackAdminUserIds:
+    Type: String
+    Default: ''
+  SlackMgrUserIds:
+    Type: String
+    Default: ''
+  SlackBotToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+  AuthSessionSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: >-
+      HMAC secret for session tokens. Required at deploy. Generate a strong
+      random value and pass via CLI/env — do not commit the real value to git.
+
+Resources:
+  WizwaySchedulerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDBTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: wizway-scheduler
+        - Key: Component
+          Value: dynamodb
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: app.main.handler
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref WizwaySchedulerTable
+          ALLOW_DEV_RESEED: !Ref AllowDevReseed
+          ALLOW_DEV_AUTH: !Ref AllowDevAuth
+          ENABLE_API_DOCS: !Ref EnableApiDocs
+          CORS_ORIGINS: !Ref CorsOrigins
+          CAMPAIGN_ID: current
+          SLACK_TEST_MODE: !Ref SlackTestMode
+          SLACK_TEST_CHANNEL_ID: !Ref SlackTestChannelId
+          SLACK_DRY_RUN: !Ref SlackDryRun
+          SLACK_DESTINATION_LABELS: !Ref SlackDestinationLabels
+          SLACK_CHANNEL_MEGURO: !Ref SlackChannelMeguro
+          SLACK_CHANNEL_YAMAMOTO: !Ref SlackChannelYamamoto
+          SLACK_CHANNEL_ISHIBASHI: !Ref SlackChannelIshibashi
+          SLACK_CHANNEL_TANAKA: !Ref SlackChannelTanaka
+          SLACK_CHANNEL_HAMADA: !Ref SlackChannelHamada
+          SLACK_CHANNEL_SALES: !Ref SlackChannelSales
+          SLACK_CLIENT_ID: !Ref SlackClientId
+          SLACK_CLIENT_SECRET: !Ref SlackClientSecret
+          SLACK_REDIRECT_URI: !Ref SlackRedirectUri
+          SLACK_TEAM_ID: !Ref SlackTeamId
+          SLACK_ADMIN_USER_IDS: !Ref SlackAdminUserIds
+          SLACK_MGR_USER_IDS: !Ref SlackMgrUserIds
+          SLACK_BOT_TOKEN: !Ref SlackBotToken
+          AUTH_SESSION_SECRET: !Ref AuthSessionSecret
+          AUTH_SESSION_TTL_SECONDS: '604800'
+      Events:
+        ProxyApi:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+        RootApi:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: ANY
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WizwaySchedulerTable
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTP API endpoint
+    Value: !Sub 'https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/'
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref WizwaySchedulerTable

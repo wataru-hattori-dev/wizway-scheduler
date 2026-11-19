@@ -1,0 +1,2191 @@
+openapi: 3.0.3
+info:
+  title: wizway-scheduler API
+  description: |
+    三者面談（マネージャー・営業・エンジニア）の日程調整システム API。
+
+    フロントエンドのモック実装（`frontend/src/model/`・`frontend/src/views/`）を解析し、
+    ドメインモデルと画面操作から抽出した契約を OpenAPI 3.0 で定義する。
+    本仕様はプロジェクトのシングルソース・オブ・トランス（SSOT）である。
+
+    ## ドメイン概要
+    - セクション（Section A〜E）ごとに候補枠を生成し、営業（salesA/salesB＝実メンバー）のいずれか1名が担当する
+    - Mgr / 営業 / 本郷の空き（dayVotes / hourVotes）から共通候補枠を算出する
+    - エンジニアは担当営業が参加可能な枠に対して ◎/〇/× の優先度を回答する
+    - 期限到来時または手動操作で自動割当・確定し、会議 URL を発行する
+
+    ## ロール
+    - `admin` — 管理者（名簿・期間・期限・確定日時変更・リマインド）
+    - `manager` — セクション Mgr（空き登録・割当確定）
+    - `sales` — 営業（空き登録・担当マトリクス）
+    - `engineer` — エンジニア（優先度回答・変更希望）
+
+    ## 画面アクセス権限（Slack OAuth）
+    Sign in with Slack（`identity.basic`）で得た `user_id` / `team_id` から画面ロールを判定する。
+    - `admin` — 管理者マスターの Slack user ID リスト。`/admin` `/mgr` `/sales` `/engineer` すべて可
+    - `mgr` — Mgr・本郷の Slack user ID リスト。`/mgr` のみ
+    - `engineer` — 上記以外で社内 `team_id` 一致。`/engineer` のみ
+    - `denied` — 社外ワークスペース。アクセス不可
+
+    ## API 認証
+    業務 API はセッション JWT（`Authorization: Bearer` または Cookie `wizway_session`）必須。
+    トークンなし・不正・期限切れは `401 Unauthorized`（業務データは返さない）。
+    認証不要の例外: Slack OAuth 開始・コールバック、開発用クイックログイン、ログアウト。
+    社内テスト公開中のロール判定は社内 `team_id` 一致で全員 `admin`（将来は user ID リストへ切替可能）。
+  version: 1.0.0
+  contact:
+    name: wizway-scheduler
+
+servers:
+  - url: /api/v1
+    description: API Gateway 経由のベースパス
+
+# 既定は認証必須。公開エンドポイントのみ operation で security: [] を指定する。
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Slack OAuth（Sign in with Slack）とセッション
+  - name: settings
+    description: キャンペーン設定・面談期間・回答期限
+  - name: sections
+    description: セクション（Section A〜E）マスタ
+  - name: members
+    description: 社員（エンジニア）マスタ
+  - name: availability
+    description: Mgr / 営業 / 本郷の空き日程
+  - name: sales-assignees
+    description: エンジニア×営業の担当割当
+  - name: slots
+    description: 候補枠（共通空きから算出）
+  - name: interviews
+    description: 面談調整状態・投票・確定・変更依頼
+  - name: assignments
+    description: 自動判定・手動割当・確定保存
+  - name: notifications
+    description: 通知（Slack 風モック）
+  - name: dev
+    description: ローカル開発用（本番では無効）
+
+paths:
+  /settings:
+    get:
+      tags: [settings]
+      summary: キャンペーン設定の取得
+      description: |
+        四半期ラベル、本郷参加可否、会議プロバイダなどの全体設定を返す。
+        モックの `createInitialState()` における `quarterLabel` / `hongoJoins` / `provider` に相当する。
+      operationId: getSettings
+      responses:
+        '200':
+          description: 設定
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignSettings'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [settings]
+      summary: キャンペーン設定の部分更新
+      description: |
+        本郷参加フラグや会議 URL プロバイダを更新する。
+        `provider` 変更時は既存の確定面談の会議 URL を再生成する（`store.setProvider`）。
+      operationId: patchSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignSettingsPatch'
+      responses:
+        '200':
+          description: 更新後の設定
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignSettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interview-period:
+    get:
+      tags: [settings]
+      summary: 面談実施期間の取得
+      description: |
+        管理者設定の面談実施期間（開始日・終了日）。
+        Mgr / 営業カレンダーの平日算出範囲（`getActiveInterviewRange`）に反映される。
+      operationId: getInterviewPeriod
+      responses:
+        '200':
+          description: 面談実施期間
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InterviewPeriod'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [settings]
+      summary: 面談実施期間の保存
+      description: |
+        開始日・終了日を保存する。終了日は開始日以降であること。
+        AdminView の `interviewPeriod.setPeriod` に相当する。
+      operationId: putInterviewPeriod
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InterviewPeriod'
+      responses:
+        '200':
+          description: 保存後の期間
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InterviewPeriod'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /response-deadlines:
+    get:
+      tags: [settings]
+      summary: 回答期限の取得
+      description: |
+        Mgr/営業向け回答期限とエンジニア向け回答期限（日付のみ）。
+        エンジニア入力開始は Mgr/営業期限の翌日 00:00 JST から。
+      operationId: getResponseDeadlines
+      responses:
+        '200':
+          description: 回答期限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseDeadlines'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [settings]
+      summary: 回答期限の保存
+      description: AdminView の `responseDeadlines.setDeadlines` に相当する。
+      operationId: putResponseDeadlines
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponseDeadlines'
+      responses:
+        '200':
+          description: 保存後の回答期限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseDeadlines'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sections:
+    get:
+      tags: [sections]
+      summary: セクション一覧の取得
+      description: Section A〜Eのセクションマスタ（`SECTIONS`）を返す。
+      operationId: listSections
+      responses:
+        '200':
+          description: セクション一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sections]
+                properties:
+                  sections:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Section'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sections/{sectionId}/deadline:
+    parameters:
+      - $ref: '#/components/parameters/SectionId'
+    get:
+      tags: [sections]
+      summary: セクション回答期限の取得
+      description: |
+        セクション単位の回答期限（ISO8601）。
+        モック state の `deadlines[sectionId]` に相当する。
+      operationId: getSectionDeadline
+      responses:
+        '200':
+          description: セクション回答期限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionDeadline'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [sections]
+      summary: セクション回答期限の更新
+      description: `store.setDeadline` に相当する。
+      operationId: putSectionDeadline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SectionDeadlineUpdate'
+      responses:
+        '200':
+          description: 更新後の期限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectionDeadline'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sections/{sectionId}/slots:
+    parameters:
+      - $ref: '#/components/parameters/SectionId'
+    get:
+      tags: [slots]
+      summary: セクション候補枠の取得
+      description: |
+        Mgr・本郷（参加時）の空きから算出した共通候補枠一覧（`candidateSlots`）。
+        営業は担当割当で別管理するため、ここでは必須参加者に含めない。
+      operationId: listSectionSlots
+      responses:
+        '200':
+          description: 候補枠一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slots]
+                properties:
+                  slots:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CandidateSlot'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sections/{sectionId}/requests:
+    parameters:
+      - $ref: '#/components/parameters/SectionId'
+    post:
+      tags: [interviews]
+      summary: セクションへ調整依頼を送信
+      description: |
+        共通空き枠数がメンバー数以上で、かつ全員に営業担当が設定されている場合、
+        `unadjusted` の面談を `adjusting` へ進め通知を発行する（`store.sendRequests`）。
+      operationId: sendSectionRequests
+      responses:
+        '200':
+          description: 依頼送信結果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionResult'
+        '400':
+          description: 枠不足または営業担当未設定
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /members:
+    get:
+      tags: [members]
+      summary: 社員一覧の取得
+      description: |
+        社員マスタ一覧。デフォルトでは論理削除されていないメンバーのみ返す。
+        AdminView の名簿（`MEMBER_MASTER` / roster）に相当する。
+      operationId: listMembers
+      parameters:
+        - name: includeDeleted
+          in: query
+          description: true のとき論理削除済みも含める
+          schema:
+            type: boolean
+            default: false
+        - name: sectionId
+          in: query
+          description: セクションで絞り込み（`unset` で未所属）
+          schema:
+            $ref: '#/components/schemas/SectionIdOrUnset'
+      responses:
+        '200':
+          description: 社員一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Member'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [members]
+      summary: 社員の追加
+      description: |
+        新しい社員を追加する。社員 ID は全体で一意の連番（欠番は再利用しない）。
+        AdminView の `addRosterName` / `nextEmployeeId` に相当する。
+      operationId: createMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberCreate'
+      responses:
+        '201':
+          description: 作成された社員
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /members/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    get:
+      tags: [members]
+      summary: 社員詳細の取得
+      operationId: getMember
+      responses:
+        '200':
+          description: 社員
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [members]
+      summary: 社員の更新（セクション移動など）
+      description: AdminView の `moveRosterMember` に相当する。表示名はセクション＋姓から再構成する。
+      operationId: patchMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberPatch'
+      responses:
+        '200':
+          description: 更新後の社員
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [members]
+      summary: 社員の論理削除
+      description: |
+        `isDeleted=true` にする。ID は欠番のまま残す（`removeRosterName`）。
+      operationId: deleteMember
+      responses:
+        '200':
+          description: 論理削除後の社員
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /members/{memberId}/slots:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    get:
+      tags: [slots]
+      summary: エンジニア向け候補枠の取得
+      description: |
+        セクション候補枠のうち、担当営業が参加可能な枠のみ返す（`engineerSlots`）。
+        担当未設定または営業が入れない枠は除外される。
+      operationId: listMemberSlots
+      responses:
+        '200':
+          description: エンジニア向け候補枠
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slots]
+                properties:
+                  slots:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CandidateSlot'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /availability/{voterId}:
+    parameters:
+      - $ref: '#/components/parameters/VoterId'
+    get:
+      tags: [availability]
+      summary: 空き日程の取得
+      description: |
+        指定投票者（salesA/salesB・本郷・各セクション Mgr）の日単位マークと時間帯選択を返す。
+        `dayVotes` / `hourVotes` に相当する。
+      operationId: getAvailability
+      responses:
+        '200':
+          description: 空き日程
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Availability'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [availability]
+      summary: 空き日程の一括保存
+      description: |
+        日マークと時間帯を一括保存する。
+        MgrView の `setPartyAvailability`、SalesView の `setSalesAvailability` に相当する。
+        全日時間を選択した場合、その日の hourMarks は省略（全空き）として扱う。
+      operationId: putAvailability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AvailabilityUpdate'
+      responses:
+        '200':
+          description: 保存後の空き日程
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Availability'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sales-assignees:
+    get:
+      tags: [sales-assignees]
+      summary: 営業担当マトリクスの取得
+      description: |
+        エンジニア ID → 営業 ID（`salesA` または `salesB`）の対応表。
+        各エンジニアは営業のどちらか1名のみ担当可能。
+      operationId: getSalesAssignees
+      responses:
+        '200':
+          description: 担当マトリクス
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SalesAssigneeMap'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [sales-assignees]
+      summary: 営業担当マトリクスの一括保存
+      description: SalesView の `setSalesAssignees` に相当する。値が null / 未指定のキーは担当解除。
+      operationId: putSalesAssignees
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SalesAssigneeMap'
+      responses:
+        '200':
+          description: 保存後の担当マトリクス
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SalesAssigneeMap'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews:
+    get:
+      tags: [interviews]
+      summary: 面談一覧の取得
+      description: |
+        全エンジニアの面談調整状態一覧。
+        クエリでセクション・ステータスによる絞り込みが可能（AdminView のフィルタ相当）。
+      operationId: listInterviews
+      parameters:
+        - name: sectionId
+          in: query
+          description: セクションで絞り込み
+          schema:
+            $ref: '#/components/schemas/SectionId'
+        - name: status
+          in: query
+          description: 面談ステータスで絞り込み
+          schema:
+            $ref: '#/components/schemas/InterviewStatus'
+      responses:
+        '200':
+          description: 面談一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [interviews]
+                properties:
+                  interviews:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Interview'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    get:
+      tags: [interviews]
+      summary: 面談詳細の取得
+      description: 指定エンジニアの面談状態・投票・確定情報を返す。
+      operationId: getInterview
+      responses:
+        '200':
+          description: 面談詳細
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}/votes:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    put:
+      tags: [interviews]
+      summary: 優先度投票の保存・送信
+      description: |
+        エンジニアの枠ごとの優先度（◎/〇/×）を保存し、回答済み（`submittedAt` 設定）とする。
+        EngineerView の `saveMemberVotes` に相当する。
+        確定済み・変更依頼ありの場合は拒否する。
+        担当営業が参加できない枠への投票は無視される。
+      operationId: putInterviewVotes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VotesUpdate'
+      responses:
+        '200':
+          description: 更新後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 確定済みのため編集不可
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}/preferences:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    put:
+      tags: [interviews]
+      summary: 希望条件の保存
+      description: `store.savePreferences` に相当する（難しい日付・希望時間メモなど）。
+      operationId: putInterviewPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InterviewPreferences'
+      responses:
+        '200':
+          description: 更新後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}/change-requests:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    post:
+      tags: [interviews]
+      summary: 日程変更希望の送信
+      description: |
+        確定済み面談に対する変更希望を送る（`store.requestChange`）。
+        ステータスを `change_requested` にし、通知を発行する。
+      operationId: createChangeRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeRequestCreate'
+      responses:
+        '201':
+          description: 変更希望受付後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 確定前のため変更希望不可
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}/reminders:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    post:
+      tags: [interviews]
+      summary: リマインド送信
+      description: |
+        回答または確定済み面談のリマインドを送り、`remindedAt` を更新する（`store.sendReminder`）。
+      operationId: sendReminder
+      responses:
+        '200':
+          description: リマインド送信後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    post:
+      tags: [interviews]
+      summary: 面談を調整中に戻す
+      description: |
+        確定情報をクリアし、ステータスを `adjusting` に戻す（`store.reopen`）。
+      operationId: reopenInterview
+      responses:
+        '200':
+          description: 再開後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /interviews/{memberId}/confirmed-time:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    put:
+      tags: [interviews]
+      summary: 確定日時の変更
+      description: |
+        管理者または Mgr による確定日時の変更（`adminChangeTime` / `mgrChangeTime`）。
+        候補枠 ID 指定、または任意の開始・終了日時（override）を受け付ける。
+      operationId: putConfirmedTime
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmedTimeUpdate'
+      responses:
+        '200':
+          description: 更新後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 枠競合または営業空きなし
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /assignments/judge:
+    post:
+      tags: [assignments]
+      summary: 自動判定の実行
+      description: |
+        セクション単位で自動割当を実行する（`store.applyJudge` / `assignSection`）。
+
+        判定ルール:
+        1. 回答済みの ◎ は先着順。担当営業が空いていれば第一希望で確定
+        2. ◎ を取れなかった場合は、10:00 開始を避けたうえで早い順に 〇 枠へスライド
+        3. `assignUnanswered=true` のときのみ、未回答者を残枠からランダム割当
+        4. 営業は必ずどちらか1名。同じ時刻に同じ営業は重複しない
+      operationId: applyJudge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JudgeRequest'
+      responses:
+        '200':
+          description: 判定結果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JudgeResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /assignments/manual:
+    post:
+      tags: [assignments]
+      summary: 手動割当による確定
+      description: |
+        指定メンバーを指定候補枠で確定する（`store.manualAssign`）。
+        枠の競合や営業空きがない場合は 409 を返す。
+      operationId: manualAssign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualAssignRequest'
+      responses:
+        '200':
+          description: 確定後の面談
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Interview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 枠競合または営業空きなし
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /assignments/overrides/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    put:
+      tags: [assignments]
+      summary: 確定前の割当オーバーライド保存
+      description: |
+        Mgr カレンダーのセル詳細モーダル「保存」、および確定前の「日時の変更」相当（`saveAssignmentOverride`）。
+        関係者（Mgr・担当営業・本郷参加時・エンジニア）が参加可能な枠のみ保存できる。
+        同じ開始時刻の他メンバーのオーバーライドは解除される。
+        確定済み面談には使わず、確定後の変更は `/interviews/{memberId}/confirmed-time` を用いる。
+      operationId: putAssignmentOverride
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slotId]
+              properties:
+                slotId:
+                  $ref: '#/components/schemas/SlotId'
+      responses:
+        '200':
+          description: 保存結果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignmentOverride'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 確定済みのため変更不可、または枠競合
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [assignments]
+      summary: 割当オーバーライドの削除
+      operationId: deleteAssignmentOverride
+      responses:
+        '204':
+          description: 削除成功
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /assignments/confirm:
+    post:
+      tags: [assignments]
+      summary: 割当の一括確定
+      description: |
+        カレンダー上の割当案を面談確定データへ一括保存する（`confirmAssignments`）。
+        会議 URL を発行し、対応するオーバーライドをクリアする。
+      operationId: confirmAssignments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmAssignmentsRequest'
+      responses:
+        '200':
+          description: 確定結果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmAssignmentsResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /notifications:
+    get:
+      tags: [notifications]
+      summary: 通知一覧の取得
+      description: 最新の通知（最大40件想定）を返す。モック state の `notifications` に相当する。
+      operationId: listNotifications
+      responses:
+        '200':
+          description: 通知一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notifications]
+                properties:
+                  notifications:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/slack/authorize-url:
+    get:
+      tags: [auth]
+      summary: Slack OAuth 認可 URL の取得
+      description: |
+        Sign in with Slack（`user_scope=identity.basic`）の認可 URL を返す。
+        フロントは返却 URL へ遷移する。
+      operationId: getSlackAuthorizeUrl
+      security: []
+      parameters:
+        - name: redirectUri
+          in: query
+          required: false
+          description: 省略時はサーバ設定 `SLACK_REDIRECT_URI` を使用
+          schema:
+            type: string
+            format: uri
+            example: http://localhost:5173/auth/slack/callback
+      responses:
+        '200':
+          description: 認可 URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlackAuthorizeUrl'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/slack/callback:
+    post:
+      tags: [auth]
+      summary: Slack OAuth コールバック（コード交換）
+      description: |
+        認可コードを `oauth.v2.access` で交換し、必要に応じて `users.identity` で
+        `user_id` / `team_id` を取得する。ロール判定結果を含むセッション（JWT）を発行する。
+        通知送信など他の Slack API は呼ばない。
+      operationId: slackOAuthCallback
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlackCallbackRequest'
+      responses:
+        '200':
+          description: セッション発行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: 現在のセッション取得
+      description: |
+        `Authorization: Bearer <token>` またはセッション Cookie から現在のログイン状態を返す。
+        トークンなし・不正・期限切れは `401 Unauthorized`。
+      operationId: getAuthMe
+      responses:
+        '200':
+          description: 認証済みセッション
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: ログアウト
+      description: セッションを無効化する（クライアントはトークンを破棄する）。
+      operationId: logout
+      security: []
+      responses:
+        '200':
+          description: ログアウト完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/dev/login:
+    post:
+      tags: [auth, dev]
+      summary: 開発用クイックログイン
+      description: |
+        Slack を経由せずに画面ロール付きセッションを発行する。
+        `ALLOW_DEV_AUTH=true` のときのみ有効（ローカル開発向け）。
+      operationId: devLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevLoginRequest'
+      responses:
+        '200':
+          description: セッション発行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: 開発用ログインが無効
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /dev/reseed:
+    post:
+      tags: [dev]
+      summary: デモデータへ復元
+      description: |
+        ローカル DynamoDB 向けの開発用 API。フロントの「デモデータを元に戻す」（`store.resetDemo`）に相当する。
+
+        テーブル内容をいったん削除し、`infra/local/demo_seed.json`（メンバー構成・営業割り当て・
+        Mgr/営業/エンジニアの空き・投票などを含むデモ状態）を再投入する。
+
+        `DYNAMODB_ENDPOINT_URL` があり、かつ `ALLOW_DEV_RESEED=true` のときのみ有効。
+        本番 DynamoDB（endpoint 未設定）への実行は拒否する。
+      operationId: reseedDemo
+      responses:
+        '200':
+          description: デモデータを復元した
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevReseedResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: セッション JWT（`/auth/slack/callback` または `/auth/dev/login` で発行）
+
+  parameters:
+    SectionId:
+      name: sectionId
+      in: path
+      required: true
+      description: セクション ID（A〜F）
+      schema:
+        $ref: '#/components/schemas/SectionId'
+    MemberId:
+      name: memberId
+      in: path
+      required: true
+      description: 社員 ID（入社順の連番）
+      schema:
+        $ref: '#/components/schemas/MemberId'
+    VoterId:
+      name: voterId
+      in: path
+      required: true
+      description: 空き日程の投票者 ID（営業・本郷・Mgr）
+      schema:
+        $ref: '#/components/schemas/PartyVoterId'
+
+  responses:
+    BadRequest:
+      description: リクエスト不正
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 認証失敗
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 権限不足（例: accessRole が denied）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: リソースが存在しない
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: サーバ内部エラー
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      description: エラー応答
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: エラーメッセージ（日本語）
+          example: 枠が見つかりません
+        code:
+          type: string
+          description: 機械可読なエラーコード
+          example: SLOT_NOT_FOUND
+
+    AccessRole:
+      type: string
+      description: |
+        画面アクセスロール（Slack user_id / team_id から判定）。
+        - admin: 管理者マスター（全画面）
+        - mgr: Mgr・本郷（/mgr のみ）
+        - engineer: 社内ワークスペースの一般社員（/engineer のみ）
+        - denied: 社外（アクセス不可）
+      enum: [admin, mgr, engineer, denied]
+      example: engineer
+
+    SlackAuthorizeUrl:
+      type: object
+      required: [authorizeUrl, redirectUri, state]
+      properties:
+        authorizeUrl:
+          type: string
+          format: uri
+          description: Slack 認可画面 URL
+        redirectUri:
+          type: string
+          format: uri
+          description: 使用したリダイレクト URI
+        state:
+          type: string
+          description: CSRF 防止用 state（コールバックで返送）
+
+    SlackCallbackRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: Slack 認可コード
+        redirectUri:
+          type: string
+          format: uri
+          description: 認可時に使った redirect_uri（省略時はサーバ設定）
+        state:
+          type: string
+          description: 認可時に発行した state
+
+    DevLoginRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          description: 開発用に付与する画面ロール
+          enum: [admin, mgr, engineer]
+          example: admin
+
+    AuthUser:
+      type: object
+      description: ログイン中ユーザー（Slack 由来）
+      required: [slackUserId, slackTeamId, accessRole]
+      properties:
+        slackUserId:
+          type: string
+          description: Slack user_id
+          example: U012ABCDEF
+        slackTeamId:
+          type: string
+          description: Slack team_id（ワークスペース）
+          example: T0000000000
+        displayName:
+          type: string
+          description: 表示名（取得できた場合）
+          example: 佐藤
+        accessRole:
+          $ref: '#/components/schemas/AccessRole'
+
+    AuthSessionResponse:
+      type: object
+      description: 認証セッション応答
+      required: [authenticated]
+      properties:
+        authenticated:
+          type: boolean
+          description: ログイン済みか
+        token:
+          type: string
+          description: セッション JWT（ログイン成功時）
+        user:
+          $ref: '#/components/schemas/AuthUser'
+        homePath:
+          type: string
+          description: ロール別の既定遷移先
+          example: /engineer
+        allowedPaths:
+          type: array
+          description: アクセス可能なパス一覧
+          items:
+            type: string
+          example: [/engineer]
+
+    ActionResult:
+      type: object
+      description: 操作結果の簡易レスポンス
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: 結果メッセージ
+          example: Section A のエンジニアへ調整依頼を送りました
+        success:
+          type: boolean
+          description: 成功したか
+          default: true
+
+    DevReseedResult:
+      type: object
+      description: 開発用 reseed（デモシード復元）の結果
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+          description: 成功したか
+          example: true
+        message:
+          type: string
+          description: 結果メッセージ
+          example: デモデータを復元しました（メンバー 33 名 / 空き回答 8 / エンジニア投票 24）
+        restored:
+          type: object
+          description: 復元した件数の内訳
+          properties:
+            itemCount:
+              type: integer
+              description: 投入した DynamoDB アイテム総数
+              minimum: 0
+            memberCount:
+              type: integer
+              description: メンバー（PROFILE）件数
+              minimum: 0
+            interviewCount:
+              type: integer
+              description: Interview アイテム件数
+              minimum: 0
+            availabilityCount:
+              type: integer
+              description: Availability アイテム件数
+              minimum: 0
+            availabilityWithMarks:
+              type: integer
+              description: dayMarks / hourMarks が非空の Availability 件数
+              minimum: 0
+            interviewVoteCount:
+              type: integer
+              description: votes が非空の Interview 件数
+              minimum: 0
+            sectionCount:
+              type: integer
+              description: Section アイテム件数
+              minimum: 0
+            deletedBeforeRestore:
+              type: integer
+              description: 復元前に削除した既存アイテム件数
+              minimum: 0
+        preserved:
+          type: object
+          description: 後方互換用（現行実装では未使用）
+          additionalProperties: true
+
+    # --- 列挙・スカラー ---
+
+    SectionId:
+      type: string
+      description: セクション ID
+      enum: [meguro, yamamoto, ishibashi, tanaka, hamada]
+      example: meguro
+
+    SectionIdOrUnset:
+      type: string
+      description: セクション ID、または未所属を表す unset
+      enum: [meguro, yamamoto, ishibashi, tanaka, hamada, unset]
+      example: meguro
+
+    MemberId:
+      type: integer
+      description: 社員 ID（入社順の連番。欠番は再利用しない）
+      minimum: 1
+      example: 1
+
+    SalesId:
+      type: string
+      description: |
+        営業スロット ID（永続化キー）。
+        表示名は Members の role=sales を ID 昇順で対応付ける（例: salesA=Sales A, salesB=Sales B）。
+      enum: [salesA, salesB]
+      example: salesA
+
+    PartyVoterId:
+      type: string
+      description: |
+        空き日程の投票者 ID。
+        `salesA` / `salesB` / `hongo` / セクション Mgr（meguro〜hamada）。
+      enum: [salesA, salesB, hongo, meguro, yamamoto, ishibashi, tanaka, hamada]
+      example: salesA
+
+    Role:
+      type: string
+      description: 画面ロール
+      enum: [admin, manager, sales, engineer]
+      example: manager
+
+    InterviewStatus:
+      type: string
+      description: |
+        面談の永続ステータス。
+        - unadjusted: 未調整
+        - adjusting: 調整中
+        - confirmed: 確定済み
+        - change_requested: 変更依頼あり
+      enum: [unadjusted, adjusting, confirmed, change_requested]
+      example: adjusting
+
+    ProgressStatusKey:
+      type: string
+      description: 画面表示用の進捗キー（`progressStatus`）
+      enum:
+        - unadjusted
+        - adjusting
+        - confirmed
+        - change_requested
+        - submitted
+        - awaiting_engineer
+        - sales_set
+        - awaiting_sales
+      example: awaiting_engineer
+
+    DayMark:
+      type: string
+      nullable: true
+      description: |
+        日単位の空きマーク。
+        - first: 強い希望（◎）※主にエンジニア投票で使用
+        - ok: 調整OK（〇）
+        - ng: 不可（×）
+        - null: 未設定
+      enum: [first, ok, ng]
+      example: ng
+
+    VoteMark:
+      type: string
+      description: |
+        エンジニアの枠単位優先度。
+        UI 上、`ok`（〇）と未設定は「空白（調整可能）」として扱われることが多い。
+      enum: [first, ok, ng]
+      example: first
+
+    MeetingProvider:
+      type: string
+      description: 会議 URL プロバイダ
+      enum: [meet, zoom]
+      example: meet
+
+    DateOnly:
+      type: string
+      description: 日付（YYYY-MM-DD、JST カレンダー日）
+      format: date
+      example: '2026-12-01'
+
+    DateTimeJst:
+      type: string
+      description: 日時（ISO8601、タイムゾーン付き。通常は +09:00）
+      format: date-time
+      example: '2026-12-04T11:00:00+09:00'
+
+    SlotId:
+      type: string
+      description: |
+        候補枠 ID。形式は `{sectionId}-{YYYY-MM-DD}-{HH}`。
+        例: `meguro-2026-12-04-11`
+      pattern: '^(meguro|yamamoto|ishibashi|tanaka|hamada)-\d{4}-\d{2}-\d{2}-\d{2}$'
+      example: meguro-2026-12-04-11
+
+    InterviewHour:
+      type: integer
+      description: |
+        面談開始時刻（時）。候補時間帯は 10,11,12,14,15,16,17,18。
+        10:00 開始は自動割当で後回し（avoided）される。
+      enum: [10, 11, 12, 14, 15, 16, 17, 18]
+      example: 11
+
+    # --- 設定 ---
+
+    CampaignSettings:
+      type: object
+      description: キャンペーン全体設定
+      required: [quarterLabel, hongoJoins, provider]
+      properties:
+        quarterLabel:
+          type: string
+          description: 表示用の四半期・期間ラベル
+          example: 2026年12月 三者面談
+        hongoJoins:
+          type: boolean
+          description: 今期に本郷が参加するか
+          example: true
+        provider:
+          $ref: '#/components/schemas/MeetingProvider'
+
+    CampaignSettingsPatch:
+      type: object
+      description: キャンペーン設定の部分更新
+      properties:
+        quarterLabel:
+          type: string
+          description: 表示用の四半期・期間ラベル
+        hongoJoins:
+          type: boolean
+          description: 本郷参加フラグ
+        provider:
+          $ref: '#/components/schemas/MeetingProvider'
+      minProperties: 1
+
+    InterviewPeriod:
+      type: object
+      description: 面談実施期間（平日カレンダーの範囲）
+      required: [startDate, endDate]
+      properties:
+        startDate:
+          $ref: '#/components/schemas/DateOnly'
+        endDate:
+          $ref: '#/components/schemas/DateOnly'
+
+    ResponseDeadlines:
+      type: object
+      description: |
+        ロール別の回答期限（日付のみ）。
+        エンジニア入力開始は `mgrSalesDeadline` の翌日 00:00 JST。
+        エンジニア入力終了は `engineerDeadline` の翌日 00:00 JST。
+      required: [mgrSalesDeadline, engineerDeadline]
+      properties:
+        mgrSalesDeadline:
+          allOf:
+            - $ref: '#/components/schemas/DateOnly'
+          description: Mgr / 営業の回答期限日
+        engineerDeadline:
+          allOf:
+            - $ref: '#/components/schemas/DateOnly'
+          description: エンジニアの回答期限日
+
+    SectionDeadline:
+      type: object
+      description: セクション単位の回答期限
+      required: [sectionId, deadline]
+      properties:
+        sectionId:
+          $ref: '#/components/schemas/SectionId'
+        deadline:
+          allOf:
+            - $ref: '#/components/schemas/DateTimeJst'
+          nullable: true
+          description: 回答期限日時。未設定時は null
+        judgedAt:
+          allOf:
+            - $ref: '#/components/schemas/DateTimeJst'
+          nullable: true
+          description: 最後に自動判定を実行した日時
+
+    SectionDeadlineUpdate:
+      type: object
+      description: セクション回答期限の更新リクエスト
+      required: [deadline]
+      properties:
+        deadline:
+          $ref: '#/components/schemas/DateTimeJst'
+
+    # --- セクション / メンバー ---
+
+    Section:
+      type: object
+      description: セクション（Mgr 単位の組織）
+      required: [id, name, mgr]
+      properties:
+        id:
+          $ref: '#/components/schemas/SectionId'
+        name:
+          type: string
+          description: セクション表示名
+          example: Section A
+        mgr:
+          type: string
+          description: Mgr 表示名
+          example: 目黒
+        sales:
+          type: string
+          description: 担当営業の表示ラベル
+          example: Sales A・Sales B
+
+    MemberRole:
+      type: string
+      description: |
+        メンバー役割。
+        - engineer: 一般エンジニア
+        - mgr: マネージャー
+        - sales: 営業
+        - hongo: 本郷
+        - other: 社長（その他）— 既存役割に当てはまらない人
+      enum: [engineer, mgr, sales, hongo, other]
+      example: engineer
+
+    Member:
+      type: object
+      description: |
+        社員マスタ。
+        表示名は「{セクション名}-{姓}」形式（未所属時は姓のみ）。
+      required: [id, surname, sectionId, name, role, isInterviewer, isDeleted]
+      properties:
+        id:
+          $ref: '#/components/schemas/MemberId'
+        surname:
+          type: string
+          description: 姓（または氏名）
+          example: 佐藤
+        sectionId:
+          $ref: '#/components/schemas/SectionIdOrUnset'
+        name:
+          type: string
+          description: 表示名
+          example: Section A-佐藤
+        role:
+          $ref: '#/components/schemas/MemberRole'
+        isInterviewer:
+          type: boolean
+          description: |
+            面談メンバーに含めるか。
+            日程調整・面談候補者の抽出は true のメンバーのみを対象とする。
+            デフォルト true。
+          default: true
+          example: true
+        isDeleted:
+          type: boolean
+          description: 論理削除フラグ。true の ID は欠番として残す
+          example: false
+
+    MemberCreate:
+      type: object
+      description: 社員追加リクエスト
+      required: [surname]
+      properties:
+        surname:
+          type: string
+          description: 姓（氏名入力）
+          example: 佐藤
+        sectionId:
+          $ref: '#/components/schemas/SectionIdOrUnset'
+        role:
+          $ref: '#/components/schemas/MemberRole'
+        isInterviewer:
+          type: boolean
+          description: 面談メンバーに含めるか（省略時 true）
+          default: true
+
+    MemberPatch:
+      type: object
+      description: 社員更新リクエスト（セクション移動・役割・面談フラグなど）
+      properties:
+        surname:
+          type: string
+          description: 姓
+        sectionId:
+          $ref: '#/components/schemas/SectionIdOrUnset'
+        role:
+          $ref: '#/components/schemas/MemberRole'
+        isInterviewer:
+          type: boolean
+          description: 面談メンバーに含めるか
+      minProperties: 1
+
+    MemberMasterRecord:
+      type: object
+      description: 社員マスタの生レコード（シード／管理用）
+      required: [id, surname, sectionId, isDeleted]
+      properties:
+        id:
+          $ref: '#/components/schemas/MemberId'
+        surname:
+          type: string
+          example: 佐藤
+        sectionId:
+          $ref: '#/components/schemas/SectionIdOrUnset'
+        role:
+          $ref: '#/components/schemas/MemberRole'
+        isInterviewer:
+          type: boolean
+          default: true
+        isDeleted:
+          type: boolean
+          example: false
+
+    # --- 空き日程 ---
+
+    DayVotes:
+      type: object
+      description: |
+        日付（YYYY-MM-DD）→ 日マーク のマップ。
+        キー未設定は「特記なし（時間帯は全空き扱い）」を意味する。
+      additionalProperties:
+        $ref: '#/components/schemas/DayMark'
+      example:
+        '2026-12-02': ng
+        '2026-12-10': ok
+
+    HourVotes:
+      type: object
+      description: |
+        日付（YYYY-MM-DD）→ 空き時間（時）の配列。
+        キーが無い日は全候補時間が空きとみなす。
+        空配列は全日不可（×）と同等。
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/InterviewHour'
+      example:
+        '2026-12-04': [11, 14, 15]
+
+    AvailabilityGrid:
+      type: object
+      description: |
+        UI グリッド表現。日付 → 選択中の開始時刻（時）の配列。
+        空配列はその日を不可にする。
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/InterviewHour'
+
+    Availability:
+      type: object
+      description: 投票者の空き日程
+      required: [voterId, dayMarks, hourMarks]
+      properties:
+        voterId:
+          $ref: '#/components/schemas/PartyVoterId'
+        dayMarks:
+          $ref: '#/components/schemas/DayVotes'
+        hourMarks:
+          $ref: '#/components/schemas/HourVotes'
+
+    AvailabilityUpdate:
+      type: object
+      description: 空き日程の一括更新ボディ
+      required: [dayMarks, hourMarks]
+      properties:
+        dayMarks:
+          $ref: '#/components/schemas/DayVotes'
+        hourMarks:
+          $ref: '#/components/schemas/HourVotes'
+
+    # --- 営業担当 ---
+
+    SalesAssigneeMap:
+      type: object
+      description: |
+        エンジニア ID（文字列キー）→ 営業 ID のマップ。
+        値を null にすると担当解除。
+      additionalProperties:
+        allOf:
+          - $ref: '#/components/schemas/SalesId'
+        nullable: true
+      example:
+        '1': salesA
+        '2': salesB
+
+    # --- 候補枠 ---
+
+    CandidateSlot:
+      type: object
+      description: 1時間の面談候補枠
+      required: [id, sectionId, day, start, end, avoided]
+      properties:
+        id:
+          $ref: '#/components/schemas/SlotId'
+        sectionId:
+          $ref: '#/components/schemas/SectionId'
+        day:
+          $ref: '#/components/schemas/DateOnly'
+        start:
+          $ref: '#/components/schemas/DateTimeJst'
+        end:
+          $ref: '#/components/schemas/DateTimeJst'
+        avoided:
+          type: boolean
+          description: 自動割当で後回しにする枠（主に 10:00 開始）か
+          example: false
+
+    BusinessDay:
+      type: object
+      description: 面談期間内の営業日
+      required: [iso, day, dow]
+      properties:
+        iso:
+          $ref: '#/components/schemas/DateOnly'
+        day:
+          type: integer
+          description: 日（1〜31）
+          example: 4
+        dow:
+          type: integer
+          description: 曜日（UTC 基準の getUTCDay。0=日 … 6=土）
+          minimum: 0
+          maximum: 6
+          example: 5
+        open:
+          type: boolean
+          description: 候補日として開いているか（候補日算出時）
+        blocking:
+          type: array
+          description: その日を塞いでいる投票者 ID
+          items:
+            $ref: '#/components/schemas/PartyVoterId'
+
+    # --- 面談 ---
+
+    InterviewPreferences:
+      type: object
+      description: エンジニアの希望条件メモ
+      properties:
+        difficultDates:
+          type: array
+          description: 都合の悪い日付
+          items:
+            $ref: '#/components/schemas/DateOnly'
+        preferredTimeNote:
+          type: string
+          description: 希望時間帯のメモ
+          example: 午後希望
+        note:
+          type: string
+          description: その他メモ
+
+    ChangeRequest:
+      type: object
+      description: 日程変更希望の内容
+      required: [reason, preferredDates, at]
+      properties:
+        reason:
+          type: string
+          description: 変更理由
+          example: 急な出張が入ったため
+        preferredDates:
+          type: string
+          description: 希望日の自由記述
+          example: 12/10 以降の午後
+        at:
+          $ref: '#/components/schemas/DateTimeJst'
+
+    ChangeRequestCreate:
+      type: object
+      description: 変更希望の作成リクエスト
+      required: [reason, preferredDates]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          description: 変更理由
+        preferredDates:
+          type: string
+          minLength: 1
+          description: 希望日
+
+    ConfirmedOverride:
+      type: object
+      description: 候補枠以外の任意確定日時
+      required: [start, end]
+      properties:
+        start:
+          $ref: '#/components/schemas/DateTimeJst'
+        end:
+          $ref: '#/components/schemas/DateTimeJst'
+
+    SlotVotes:
+      type: object
+      description: 候補枠 ID → 優先度マーク のマップ
+      additionalProperties:
+        $ref: '#/components/schemas/VoteMark'
+      example:
+        meguro-2026-12-04-11: first
+        meguro-2026-12-05-14: ng
+
+    VotesUpdate:
+      type: object
+      description: 優先度投票の保存ボディ
+      required: [votes]
+      properties:
+        votes:
+          $ref: '#/components/schemas/SlotVotes'
+
+    Interview:
+      type: object
+      description: エンジニア1名分の面談調整状態
+      required: [memberId, status, preferences, votes]
+      properties:
+        memberId:
+          $ref: '#/components/schemas/MemberId'
+        status:
+          $ref: '#/components/schemas/InterviewStatus'
+        progressStatus:
+          $ref: '#/components/schemas/ProgressStatusKey'
+        progressLabel:
+          type: string
+          description: 進捗の日本語ラベル
+          example: エンジニア回答待ち
+        submittedAt:
+          allOf:
+            - $ref: '#/components/schemas/DateTimeJst'
+          nullable: true
+          description: 優先度回答の送信日時。未送信時は null
+        confirmedSlotId:
+          allOf:
+            - $ref: '#/components/schemas/SlotId'
+          nullable: true
+          description: 確定した候補枠 ID。override 利用時は null 可
+        confirmedSalesId:
+          allOf:
+            - $ref: '#/components/schemas/SalesId'
+          nullable: true
+          description: 確定した担当営業
+        confirmedOverride:
+          allOf:
+            - $ref: '#/components/schemas/ConfirmedOverride'
+          nullable: true
+          description: 候補枠外の確定日時
+        assignReason:
+          type: string
+          nullable: true
+          description: 割当理由の説明文
+          example: 第一希望で確定（Sales A担当）
+        meetingUrl:
+          type: string
+          nullable: true
+          description: 発行済み会議 URL
+          example: https://meet.google.com/abc-defg-hij
+        pendingNote:
+          type: string
+          nullable: true
+          description: 手動割当待ちなどの注意メッセージ
+        remindedAt:
+          allOf:
+            - $ref: '#/components/schemas/DateTimeJst'
+          nullable: true
+          description: 最後にリマインドした日時
+        changeRequest:
+          allOf:
+            - $ref: '#/components/schemas/ChangeRequest'
+          nullable: true
+          description: 進行中の変更希望
+        preferences:
+          $ref: '#/components/schemas/InterviewPreferences'
+        votes:
+          $ref: '#/components/schemas/SlotVotes'
+        salesAssigneeId:
+          allOf:
+            - $ref: '#/components/schemas/SalesId'
+          nullable: true
+          description: 現在の担当営業（salesAssignee マップ由来）
+
+    ConfirmedTimeUpdate:
+      type: object
+      description: |
+        確定日時変更リクエスト。
+        `slotId` 指定時は候補枠から開始・終了を決定する。
+        未指定時は `start` / `end` による override を用いる。
+      properties:
+        slotId:
+          $ref: '#/components/schemas/SlotId'
+        start:
+          $ref: '#/components/schemas/DateTimeJst'
+        end:
+          $ref: '#/components/schemas/DateTimeJst'
+        salesId:
+          $ref: '#/components/schemas/SalesId'
+        source:
+          type: string
+          description: 操作元（通知文言の切替用）
+          enum: [admin, mgr]
+          default: admin
+
+    # --- 割当 ---
+
+    AssignmentItem:
+      type: object
+      description: 自動/手動割当の1件
+      required: [memberId, slotId, salesId, reason]
+      properties:
+        memberId:
+          $ref: '#/components/schemas/MemberId'
+        slotId:
+          $ref: '#/components/schemas/SlotId'
+        salesId:
+          $ref: '#/components/schemas/SalesId'
+        reason:
+          type: string
+          description: 割当理由
+          example: 第一希望で確定（Sales A担当）
+
+    ManualNeededItem:
+      type: object
+      description: 自動割当できず手動が必要なメンバー
+      required: [memberId, reason]
+      properties:
+        memberId:
+          $ref: '#/components/schemas/MemberId'
+        reason:
+          type: string
+          example: 空いている〇枠と担当可能な営業がいないため、手動割り当てが必要です
+
+    JudgeRequest:
+      type: object
+      description: 自動判定リクエスト
+      required: [sectionIds]
+      properties:
+        sectionIds:
+          type: array
+          description: 判定対象セクション
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/SectionId'
+        assignUnanswered:
+          type: boolean
+          description: |
+            true のとき未回答者も残枠からランダム割当する（期限到来処理）。
+            期限が未来の場合はサーバ側で期限を現在時刻に繰り上げる。
+          default: false
+
+    SectionJudgeSummary:
+      type: object
+      description: セクション単位の判定サマリ
+      required: [sectionId, assignments, manual]
+      properties:
+        sectionId:
+          $ref: '#/components/schemas/SectionId'
+        assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/AssignmentItem'
+        manual:
+          type: array
+          items:
+            $ref: '#/components/schemas/ManualNeededItem'
+        summary:
+          type: string
+          description: 人間可読なサマリ
+          example: Section A: 確定3名 / 手動待ち1名
+
+    JudgeResult:
+      type: object
+      description: 自動判定の全体結果
+      required: [sections]
+      properties:
+        sections:
+          type: array
+          items:
+            $ref: '#/components/schemas/SectionJudgeSummary'
+        message:
+          type: string
+          description: 結合サマリメッセージ
+
+    ManualAssignRequest:
+      type: object
+      description: 手動割当リクエスト
+      required: [memberId, slotId]
+      properties:
+        memberId:
+          $ref: '#/components/schemas/MemberId'
+        slotId:
+          $ref: '#/components/schemas/SlotId'
+
+    AssignmentOverride:
+      type: object
+      description: 確定前の手動割当オーバーライド
+      required: [memberId, slotId]
+      properties:
+        memberId:
+          $ref: '#/components/schemas/MemberId'
+        slotId:
+          $ref: '#/components/schemas/SlotId'
+
+    ConfirmAssignmentsRequest:
+      type: object
+      description: 一括確定リクエスト
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [memberId, slotId]
+            properties:
+              memberId:
+                $ref: '#/components/schemas/MemberId'
+              slotId:
+                $ref: '#/components/schemas/SlotId'
+
+    ConfirmAssignmentsResult:
+      type: object
+      description: 一括確定結果
+      required: [confirmedCount, interviews, message]
+      properties:
+        confirmedCount:
+          type: integer
+          description: 確定できた人数
+          minimum: 0
+        interviews:
+          type: array
+          items:
+            $ref: '#/components/schemas/Interview'
+        message:
+          type: string
+          example: 3名の面談を確定しました
+
+    # --- 通知 ---
+
+    Notification:
+      type: object
+      description: 通知（Slack チャンネル風）
+      required: [id, at, channel, body]
+      properties:
+        id:
+          type: string
+          description: 通知 ID
+          example: n_ab12cd34
+        at:
+          $ref: '#/components/schemas/DateTimeJst'
+        channel:
+          type: string
+          description: 通知チャンネル名
+          example: '#面談-Section A'
+        body:
+          type: string
+          description: 通知本文
+
+    # --- ルール定数（参照用） ---
+
+    SchedulingRules:
+      type: object
+      description: |
+        スケジューリング制約の説明用スキーマ（エンドポイントでは直接返さないが、
+        ドメインルールのドキュメントとして定義する）。
+      properties:
+        minSlots:
+          type: integer
+          description: セクションあたり推奨最小候補枠数（モック定数 MIN_SLOTS）
+          example: 10
+        interviewDurationHours:
+          type: integer
+          description: 1人あたりの面談時間（時間）
+          example: 1
+        salesPerInterview:
+          type: integer
+          description: 1面談あたりの営業人数（必ず1名）
+          example: 1
+        markSymbols:
+          type: object
+          description: マーク記号
+          properties:
+            first:
+              type: string
+              example: ◎
+            ok:
+              type: string
+              example: 〇
+            ng:
+              type: string
+              example: ×
+        markLabels:
+          type: object
+          description: マークの日本語ラベル
+          properties:
+            first:
+              type: string
+              example: 強い希望
+            ok:
+              type: string
+              example: 調整OK
+            ng:
+              type: string
+              example: 不可
+        statusLabels:
+          type: object
+          description: 永続ステータスの日本語ラベル
+          additionalProperties:
+            type: string
+          example:
+            unadjusted: 未調整
+            adjusting: 調整中
+            confirmed: 確定済み
+            change_requested: 変更依頼あり
+        candidateHours:
+          type: array
+          description: 候補開始時刻一覧
+          items:
+            $ref: '#/components/schemas/InterviewHour'

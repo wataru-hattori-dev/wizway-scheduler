@@ -1,0 +1,65 @@
+# CloudFormation / SAM 断片 — wizway-scheduler DynamoDB
+# 設計根拠: spec/dynamodb-design.md
+# ローカル作成スクリプト (infra/local/init_db.py) とキー定義を揃えること。
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: wizway-scheduler DynamoDB single-table
+
+Parameters:
+  TableName:
+    Type: String
+    Default: wizway-scheduler
+    Description: DynamoDB table name
+
+Resources:
+  WizwaySchedulerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: wizway-scheduler
+        - Key: Component
+          Value: dynamodb
+
+Outputs:
+  TableName:
+    Value: !Ref WizwaySchedulerTable
+  TableArn:
+    Value: !GetAtt WizwaySchedulerTable.Arn

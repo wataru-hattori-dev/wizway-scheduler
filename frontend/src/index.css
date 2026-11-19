@@ -1,0 +1,395 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  body {
+    @apply m-0 max-w-full bg-bg font-sans text-ink antialiased;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    @apply font-sans text-inherit;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+
+  h1,
+  h2,
+  p {
+    @apply m-0;
+  }
+
+  h1 {
+    @apply text-[clamp(1.7rem,2.4vw,2.35rem)] font-bold leading-tight tracking-tight;
+  }
+
+  h2 {
+    @apply text-[1.05rem] font-semibold;
+  }
+
+  :focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-accent;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply rounded-xl border-0 bg-white px-3.5 py-2.5 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply bg-accent text-white;
+  }
+
+  .btn-ghost {
+    @apply border border-line bg-white;
+  }
+
+  .btn-small {
+    @apply px-2.5 py-1.5 text-sm;
+  }
+
+  .field input:not([type='radio']):not([type='checkbox']),
+  .field select,
+  .field textarea,
+  .grid input:not([type='radio']):not([type='checkbox']),
+  .grid select,
+  .grid textarea {
+    @apply w-full rounded-xl border border-line bg-white px-3 py-2.5;
+  }
+
+  .pill {
+    @apply whitespace-nowrap rounded-full bg-[#eee] px-2 py-1 text-xs;
+  }
+
+  .pill-unadjusted {
+    @apply bg-[#eeeae4];
+  }
+
+  .pill-adjusting,
+  .pill-awaiting_engineer {
+    @apply bg-warn-bg text-warn;
+  }
+
+  .pill-awaiting_sales {
+    @apply bg-[#efe8df] text-[#6a5340];
+  }
+
+  .pill-sales_set {
+    @apply bg-[#e4eef5] text-[#24506e];
+  }
+
+  .pill-confirmed {
+    @apply bg-ok-bg text-ok;
+  }
+
+  .pill-change_requested {
+    @apply bg-danger-bg text-danger;
+  }
+
+  .choice,
+  .stat {
+    @apply rounded-card border border-line bg-paper p-4 text-left shadow-card;
+  }
+
+  .choice small,
+  .stat span {
+    @apply block text-muted;
+  }
+
+  .choice strong,
+  .stat strong {
+    @apply my-1 block text-[1.2rem];
+  }
+
+  .chips button.is-active,
+  .segment button.is-active,
+  button.is-active {
+    @apply border-navy bg-navy text-white;
+  }
+
+  .chips button,
+  .date-chips button,
+  .segment button {
+    @apply rounded-full border border-line bg-white px-3 py-1.5;
+  }
+
+  .mark {
+    @apply grid justify-items-center gap-0.5 rounded-xl border border-line bg-white px-1 py-2;
+  }
+
+  .mark b {
+    @apply text-[1.2rem] leading-none;
+  }
+
+  .mark small {
+    @apply text-muted;
+  }
+
+  .mark-first.is-on {
+    @apply border-accent bg-accent text-white;
+  }
+
+  .mark-ok.is-on {
+    @apply border-ok bg-ok text-white;
+  }
+
+  .mark-ng.is-on {
+    @apply border-navy bg-navy text-white;
+  }
+
+  .mark.is-on small {
+    @apply text-inherit;
+  }
+
+  .member-list button {
+    @apply flex w-full items-center justify-between gap-2 rounded-2xl border border-line bg-white p-3 text-left;
+  }
+
+  .member-list button.is-active {
+    @apply border-navy;
+  }
+
+  .member-list small,
+  .roster small,
+  .vote-when em {
+    @apply block text-muted;
+  }
+
+  .roster li,
+  .slot-list li,
+  .vote-list li {
+    @apply grid items-center gap-2.5 rounded-2xl border border-line p-3;
+  }
+
+  .roster li {
+    @apply grid-cols-1 lg:grid-cols-[minmax(160px,1.1fr)_auto_minmax(180px,1.3fr)_auto];
+  }
+
+  .roster li.has-request {
+    @apply bg-danger-bg;
+  }
+
+  .slot-list li {
+    @apply grid-cols-[auto_1fr_auto];
+  }
+
+  .vote-list li {
+    @apply grid-cols-1 md:grid-cols-[minmax(180px,0.8fr)_1.4fr];
+  }
+
+  .vote-list li.is-difficult,
+  .vote-day.is-difficult {
+    @apply bg-[#fff6ee];
+  }
+
+  .vote-day {
+    @apply grid gap-2.5 rounded-2xl border border-line p-3;
+  }
+
+  .day-head {
+    @apply flex flex-wrap items-center justify-between gap-2;
+  }
+
+  .difficult-note {
+    @apply text-xs not-italic text-warn;
+  }
+
+  .day-actions .is-first {
+    @apply border-accent bg-accent text-white;
+  }
+
+  .day-actions .is-ok {
+    @apply border-ok bg-ok text-white;
+  }
+
+  .day-actions .is-ng {
+    @apply border-navy bg-navy text-white;
+  }
+
+  .chip {
+    @apply rounded-full border border-line bg-white px-2 py-1 text-xs;
+  }
+
+  .chip.is-avoid {
+    @apply border-dashed text-warn;
+  }
+
+  .switch {
+    @apply relative h-7 w-12 flex-none rounded-full border-0 bg-[#d9d1c6];
+  }
+
+  .switch span {
+    @apply absolute left-[3px] top-[3px] h-[22px] w-[22px] rounded-full bg-white transition-transform;
+  }
+
+  .switch.is-on {
+    @apply bg-ok;
+  }
+
+  .switch.is-on span {
+    @apply translate-x-5;
+  }
+
+  .people li {
+    @apply flex items-center gap-2 rounded-2xl bg-white/5 px-2.5 py-2;
+  }
+
+  .people small {
+    @apply block text-[#d9cfc3];
+  }
+
+  .avatar {
+    @apply grid h-9 w-9 place-items-center rounded-full bg-white text-xs font-bold text-navy;
+  }
+
+  .tone-sales {
+    @apply bg-[#f3d7cc];
+  }
+
+  .tone-guest {
+    @apply bg-[#f6e7b8];
+  }
+
+  .modal-back,
+  .drawer-back {
+    @apply fixed inset-0 z-20 grid place-items-center bg-[rgba(22,28,28,0.46)] p-[18px];
+  }
+
+  .modal {
+    @apply grid w-[min(560px,100%)] gap-3 rounded-card bg-paper p-4;
+  }
+
+  .modal-head {
+    @apply flex items-center justify-between gap-2;
+  }
+
+  .modal-body,
+  .modal-footer {
+    @apply grid gap-3;
+  }
+
+  .modal-footer {
+    @apply auto-cols-auto grid-flow-col justify-end;
+  }
+
+  .icon-btn {
+    @apply border-0 bg-transparent text-[22px] leading-none;
+  }
+
+  .is-good {
+    @apply font-bold text-ok;
+  }
+
+  .is-done {
+    @apply text-ok;
+  }
+
+  .due.is-past {
+    @apply font-bold text-danger;
+  }
+
+  .candidate-card.is-empty {
+    @apply bg-warn-bg;
+  }
+
+  .steps li {
+    @apply flex gap-2.5;
+  }
+
+  .steps span,
+  .slot-list span {
+    @apply grid h-7 w-7 flex-none place-items-center rounded-full bg-navy text-[13px] text-white;
+  }
+
+  .hero {
+    @apply flex flex-wrap items-stretch justify-between gap-3 pt-2;
+  }
+
+  .hero-art {
+    @apply min-w-[min(100%,280px)] rounded-card bg-[#243f40] p-[18px] text-[#f6f1e8] shadow-card;
+  }
+
+  .cal-card {
+    @apply grid gap-1 rounded-2xl bg-[#fffdf9] p-4 text-ink;
+  }
+
+  .day-vote li {
+    @apply grid gap-2 border-b border-line py-2;
+  }
+
+  .day-vote-main,
+  .day-detail {
+    @apply flex flex-wrap items-center justify-between gap-2;
+  }
+
+  .day-detail {
+    @apply justify-start;
+  }
+
+  .hour-panel {
+    @apply flex w-full flex-wrap gap-1.5 rounded-xl border border-line bg-white p-2;
+  }
+
+  .hour-panel .is-on {
+    @apply border-navy bg-navy text-white;
+  }
+
+  .hour-panel .quiet {
+    @apply m-0 w-full;
+  }
+
+  .matrix {
+    @apply w-full min-w-[920px] border-collapse;
+  }
+
+  .matrix th,
+  .matrix td {
+    @apply whitespace-nowrap border-b border-line p-2 text-center text-[13px];
+  }
+
+  .matrix th:first-child,
+  .matrix td:first-child {
+    @apply sticky left-0 bg-paper text-left;
+  }
+
+  /* 左サイドバー開発用 date：カレンダーアイコンを白く明示 */
+  .dev-date-local {
+    color-scheme: dark;
+  }
+
+  .dev-date-local::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 1;
+    width: 1.15rem;
+    height: 1.15rem;
+    margin-left: 0.35rem;
+    padding: 0.1rem;
+    border-radius: 0.25rem;
+    filter: invert(1) brightness(1.35);
+  }
+
+  .toast-banner {
+    animation: toast-in 180ms ease-out;
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, 12px);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+  }
+}

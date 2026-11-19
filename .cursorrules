@@ -1,0 +1,28 @@
+# .cursorrules — wizway-scheduler
+
+## 必須
+
+作業開始前に必ず `AGENTS.md` を読み、そのプロジェクト仕様・ルールに常に従うこと。
+`AGENTS.md` と本ファイルの内容が食い違う場合は `AGENTS.md` を優先する。
+
+## 技術スタック（遵守）
+
+- フロントエンド: React + TypeScript + Vite + Tailwind CSS
+- API / バックエンド: Python (AWS Lambda) + API Gateway
+- データベース: Amazon DynamoDB
+- インフラ / 配信: S3 + CloudFront（IaC で管理）
+- モノレポ: `frontend/`, `backend/`, `infra/`, `spec/`
+
+スタック外の技術を勝手に導入しない。変更が必要な場合は理由を明示し、既存方針との整合を確認する。
+
+## SSOT と縦切り
+
+- `spec/openapi.yaml`（OpenSpec）が唯一の正解仕様。型・通信はこの仕様に合わせる
+- 開発順は常に: OpenSpec → AWS インフラ / Python Lambda → フロントエンド通信結合
+
+## モックからの本番化ルール
+
+1. `frontend/src/model/` および `frontend/src/views/` の既存コードを解析し、意図・ドメイン表現・UI フローを把握する
+2. モック実装を一括削除せず、OpenSpec 準拠の本番 API 通信へ順次置き換える
+3. 置き換え後も画面の責務分割（views / components / model）を維持する
+4. 仕様とモックが矛盾する場合は OpenSpec を正とし、差分を明示してから実装する
