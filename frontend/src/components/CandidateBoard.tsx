@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Modal } from './Modal'
 import { availableHours, blockingVoters, candidateSlots, VOTER_LABEL } from '../model/candidates'
 import { businessDays, HOURS, hourOf, slotBounds } from '../model/calendar'
-import { formatDate } from '../model/format'
+import { formatDate, stripSectionNamePrefix } from '../model/format'
 import { useInterviewPeriod } from '../model/interviewPeriod'
 import { assignedSalesId, salesCanTakeSlot } from '../model/rules'
 import { isGeneralEngineer } from '../model/membersMaster'
@@ -421,7 +421,8 @@ function calendarDaysInRange(rangeStart: string, rangeEnd: string) {
 }
 
 function surnameOf(member) {
-  return member?.surname || String(member?.name || '').replace(/^.+セクション-/, '') || '—'
+  if (member?.surname) return member.surname
+  return stripSectionNamePrefix(String(member?.name || '')) || '—'
 }
 
 /** 確定済みモーダル用: 時刻のみ（例: 16:00-17:00） */

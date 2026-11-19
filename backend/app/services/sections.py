@@ -17,12 +17,35 @@ SECTION_META: dict[str, dict[str, str]] = {
 }
 
 
+def _section_field_from_db(section_id: str, field: str) -> str | None:
+    """DynamoDB SECTION レコードの表示フィールドを優先取得する。"""
+    if not section_id or section_id == "unset":
+        return None
+    try:
+        item = repo().get(campaign_pk(), f"SECTION#{section_id}")
+    except Exception:
+        # DB 未接続・設定不足時は呼び出し側で SECTION_META フォールバック
+        return None
+    if not item:
+        return None
+    value = item.get(field)
+    return str(value) if value else None
+
+
 def section_display_name(section_id: str) -> str:
+    """セクション表示名。DB の name を優先し、無いときのみ汎用フォールバック。"""
+    from_db = _section_field_from_db(section_id, "name")
+    if from_db:
+        return from_db
     meta = SECTION_META.get(section_id)
     return meta["name"] if meta else section_id
 
 
 def section_mgr_name(section_id: str) -> str:
+    """セクション Mgr 表示名。DB の mgr を優先し、無いときのみ汎用フォールバック。"""
+    from_db = _section_field_from_db(section_id, "mgr")
+    if from_db:
+        return from_db
     meta = SECTION_META.get(section_id)
     return meta["mgr"] if meta else section_id
 

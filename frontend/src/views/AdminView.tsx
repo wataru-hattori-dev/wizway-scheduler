@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import { getBootstrapCache, setBootstrapCache } from '../api/bootstrapCache'
 import { HongoScheduleCalendar } from '../components/HongoScheduleCalendar'
-import { confirmedWindow, formatRange } from '../model/format'
+import { confirmedWindow, formatRange, stripSectionNamePrefix } from '../model/format'
 import { useInterviewPeriod } from '../model/interviewPeriod'
 import { useResponseDeadlines } from '../model/responseDeadlines'
 import {
@@ -31,7 +31,7 @@ function normalizeMember(member, fallbackId) {
   const id = Number(member.id)
   const safeId = Number.isFinite(id) && id > 0 ? id : fallbackId
   const sectionId = member.sectionId || 'unset'
-  const surname = member.surname || String(member.name || '').replace(/^.+セクション-/, '') || `社員${safeId}`
+  const surname = member.surname || stripSectionNamePrefix(String(member.name || '')) || `社員${safeId}`
   const name =
     member.name ||
     (sectionId === 'unset' ? surname : `${sectionLabelOf(sectionId)}-${surname}`)
@@ -762,7 +762,7 @@ export function AdminView() {
               index === 0 || rows[index - 1].sectionId !== member.sectionId
             const displayName =
               member.surname ||
-              String(member.name || '').replace(/^.+セクション-/, '') ||
+              stripSectionNamePrefix(String(member.name || '')) ||
               member.name
             return (
               <Fragment key={member.id}>

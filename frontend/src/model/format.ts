@@ -140,3 +140,14 @@ export function slotDay(iso) {
   const get = (type) => parts.find((part) => part.type === type)?.value || '00'
   return `${get('year')}-${get('month')}-${get('day')}`
 }
+
+/**
+ * 表示名からセクション接頭辞を除去する。
+ * 例: "○○セクション-姓" / "Section A-Surname"（個人名・社内 ID はハードコードしない）
+ */
+export function stripSectionNamePrefix(name: string) {
+  const raw = String(name || '')
+  // 「○○セクション-姓」または「Section A-Surname」（先頭が Section の場合も含む）
+  const stripped = raw.replace(/^(?:.+セクション|Section\s+\w+)-/, '')
+  return stripped || raw
+}

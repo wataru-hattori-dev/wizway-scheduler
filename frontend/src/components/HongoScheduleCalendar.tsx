@@ -2,10 +2,11 @@ import { useMemo, useState } from 'react'
 import { availabilityFromVotes, isHourSelected } from '../model/availability'
 import { businessDays, HOURS, hourOf, isJapaneseHoliday, slotBounds } from '../model/calendar'
 import { candidateSlots } from '../model/candidates'
-import { formatDate } from '../model/format'
+import { formatDate, stripSectionNamePrefix } from '../model/format'
 import { useInterviewPeriod } from '../model/interviewPeriod'
-import { assignedSalesId, SALES_IDS, SALES_LABEL } from '../model/rules'
-import { memberById, MEMBERS, sectionById } from '../model/seed'
+import { localSalesFallback } from '../model/localSeedData'
+import { assignedSalesId, SALES_IDS, SALES_LABEL, salesRoleMembers } from '../model/rules'
+import { interviewMembersOf, memberById, sectionById } from '../model/seed'
 import { autoAssignInterviews } from './CandidateBoard'
 import { Modal } from './Modal'
 
@@ -32,7 +33,8 @@ function calendarDaysInRange(rangeStart: string, rangeEnd: string) {
 }
 
 function surnameOf(member) {
-  return member?.surname || String(member?.name || '').replace(/^.+セクション-/, '') || '—'
+  if (member?.surname) return member.surname
+  return stripSectionNamePrefix(String(member?.name || '')) || '—'
 }
 
 function interviewLabel(member) {
@@ -105,7 +107,8 @@ function collectHongoMeetings(state, assignments: Map<any, any>): HongoMeeting[]
   const meetings: HongoMeeting[] = []
   const seen = new Set<string>()
 
-  for (const member of MEMBERS.filter((m) => m.isInterviewer !== false)) {
+  // API 水和後のレジストリを参照（静的 MEMBERS は本番ビルドで空）
+  for (const member of interviewMembersOf()) {
     const interview = state.interviews?.[member.id]
     const salesId =
       interview?.confirmedSalesId ||
@@ -197,10 +200,32 @@ function StatusBadge({ source }: { source: HongoMeeting['source'] }) {
 
 type SalesFilterId = 'all' | (typeof SALES_IDS)[number]
 
-const SALES_FILTER_TABS: { id: SalesFilterId; label: string }[] = [
-  { id: 'all', label: '全員' },
-  ...SALES_IDS.map((id) => ({ id, label: SALES_LABEL[id] || id })),
-]
+type SalesFilterTab = {
+  id: SalesFilterId
+  label: string
+  /** role=sales メンバー ID（ID 昇順で salesA/salesB に対応）。全員タブは null */
+  memberId: number | null
+}
+
+/**
+ * 営業A/営業B タブを DB の role=sales メンバーへ紐づける。
+ * - 並び: OpenAPI どおり ID 昇順（例: member 4 → salesA, 27 → salesB）
+ * - 表示名: 公開用の汎用ラベル（個人名は出さない）
+ */
+function buildSalesFilterTabs(): SalesFilterTab[] {
+  const salesMembers = salesRoleMembers()
+  return [
+    { id: 'all', label: '全員', memberId: null },
+    ...SALES_IDS.map((salesId, index) => {
+      const member = salesMembers[index]
+      return {
+        id: salesId as SalesFilterId,
+        label: SALES_LABEL[salesId] || localSalesFallback[salesId] || salesId,
+        memberId: member ? Number(member.id) : null,
+      }
+    }),
+  ]
+}
 
 export function HongoScheduleCalendar({
   state,
@@ -214,6 +239,9 @@ export function HongoScheduleCalendar({
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [dayMeetings, setDayMeetings] = useState<HongoMeeting[] | null>(null)
   const [salesFilter, setSalesFilter] = useState<SalesFilterId>('all')
+
+  // API 水和後のレジストリを参照して salesA/salesB ↔ 営業メンバーを解決
+  const salesFilterTabs = useMemo(() => buildSalesFilterTabs(), [state])
 
   const hongoGrid = useMemo(
     () => availabilityFromVotes(state.dayVotes?.hongo, state.hourVotes?.hongo),
@@ -320,7 +348,7 @@ export function HongoScheduleCalendar({
                   aria-label="担当者フィルター"
                   data-testid="hongo-sales-filter"
                 >
-                  {SALES_FILTER_TABS.map((tab) => {
+                  {salesFilterTabs.map((tab) => {
                     const active = salesFilter === tab.id
                     return (
                       <button
@@ -329,6 +357,7 @@ export function HongoScheduleCalendar({
                         role="tab"
                         aria-selected={active}
                         data-testid={`hongo-sales-filter-${tab.id}`}
+                        data-sales-member-id={tab.memberId ?? undefined}
                         className={`shrink-0 rounded-full border px-3 py-1 text-sm transition ${
                           active
                             ? 'border-[#c6532a] bg-[#c6532a] text-white'

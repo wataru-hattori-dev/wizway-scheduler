@@ -1,3 +1,4 @@
+import { stripSectionNamePrefix } from '../model/format'
 import { progressStatus, SALES_LABEL, salesNamesJoined, statusTone } from '../model/rules'
 
 export function StatusPill({ interview, hasSlots = false, hasSalesOffer = false }) {
@@ -33,7 +34,7 @@ export function ParticipantList({ section, member, hongoJoins, salesId, assigned
     <ul className="flex list-none flex-wrap gap-3 p-0">
       {people.map((person) => (
         <li key={`${person.role}-${person.name}`}>
-          <span className={`avatar tone-${TONE[person.role]}`}>{person.name.replace('セクション-', '').slice(0, 2)}</span>
+          <span className={`avatar tone-${TONE[person.role]}`}>{stripSectionNamePrefix(person.name).slice(0, 2)}</span>
           <span>
             <small>{person.role}</small>
             {person.name}
