@@ -36,7 +36,11 @@ async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
     body: dict = {"message": exc.message}
     if exc.code:
         body["code"] = exc.code
-    return JSONResponse(status_code=exc.status_code, content=body)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=body,
+        media_type="application/json; charset=utf-8",
+    )
 
 
 async def http_error_handler(_request: Request, exc: HTTPException) -> JSONResponse:

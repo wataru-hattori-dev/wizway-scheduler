@@ -14,7 +14,5 @@ capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 fail_on_empty_changeset = false
 resolve_s3 = true
-# AuthSessionSecret / CorsOrigins は Git に書かず、デプロイ時に上書きする（README 参照）。
-# ここには秘密情報を置かないこと。
-# Slack チャンネル ID / Team ID / 秘密は Git に書かない。backend/.deploy-secrets.ps1 から上書きする。
+# Secrets and CorsOrigins are passed at deploy time (not stored in git).
 parameter_overrides = "DynamoDBTableName=\"wizway-scheduler\" AllowDevReseed=\"false\" AllowDevAuth=\"false\" EnableApiDocs=\"false\" SlackTestMode=\"true\" SlackDryRun=\"false\" SlackDestinationLabels=\"true\""
